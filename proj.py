@@ -20,6 +20,7 @@ print("Hi Take:", data.take(1))
 spark.stop()
 
 
+
 # The below commented code is for reference when using MapReduce with pyspark
 
 # use filter to remove rows with null values in the "Name" or "Type" columns
