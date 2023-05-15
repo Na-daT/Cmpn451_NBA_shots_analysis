@@ -1,18 +1,14 @@
-import os
-import sys
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.regression import GBTRegressor
+from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import when, mean, round, concat_ws, col, split, expr, regexp_extract
 from pyspark.sql.types import IntegerType
-#from pyspark import SparkContext, SparkConf, Spark
-
-#os.environ['PYSPARK_PYTHON'] = sys.executable
-#os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
 
 # create a SparkContext object
 spark = SparkSession.builder.appName("NBA_Shot_Analysis").getOrCreate()
 data = spark.read.csv("./NBA shot log 16-17-regular season/Shot data/*.csv", header=True, inferSchema=True)
 player_data = spark.read.csv("C:/Users/Muhab/Documents/GitHub/Cmpn451_NBA_shots_analysis/NBA shot log 16-17-regular season\Player Regular 16-17 Stats.csv", header=True, inferSchema=True)
-
 
 # Add a column to player_data that is the player's name combine the First Name and Last Name
 player_data = player_data.withColumn("Name", concat_ws(" ","#FirstName",'#LastName'))
@@ -27,15 +23,17 @@ player_data = player_data.drop("#Date/Time of Update: 2017-05-09 4:34:01 PM", "#
 # join the two dataframes on the "Name" column of player_data with the shoot_player column of data
 data = data.join(player_data, data["shoot player"] == player_data["Name"], "inner")
 # remove the "Name", "shoot player" column from data
-data = data.drop("shoot player", 'date', 'home game', 'away team', 'FtAtt', 'FtMade')
+data = data.drop("shoot player", 'date', 'home game', 'home team', 'away team', '#FtAtt', '#FtMade',
+                 'self previous shot', 'opponent previous shot', 'time from last shot', 'Name', 'quarter', 'shot type')
 # drop nulls in location x
-data = data.dropna(subset=['location x', 'self previous shot', 'opponent previous shot', 'time from last shot'])
+data = data.dropna(subset=['location x'])
 # drop players with 0 in Fg2PtAtt or Fg3PtAtt
 data = data.filter((data["#Fg2PtAtt"] != 0) & (data["#Fg3PtAtt"] != 0))
 
-
 # if points = 2 then accuracy = Fg2PtMade / Fg2PtAtt, else acuracy = Fg3PtMade / Fg3PtAtt
 data = data.withColumn("accuracy", when(data["points"] == 2, data["#Fg2PtMade"] / data["#Fg2PtAtt"]).otherwise(data["#Fg3PtMade"] / data["#Fg3PtAtt"]))
+# drop the columns that are not needed anymore [#Fg2PtAtt, #Fg2PtMade, #Fg3PtAtt, #Fg3PtMade]
+data = data.drop("#Fg2PtAtt", "#Fg2PtMade",  "#Fg3PtAtt", "#Fg3PtMade")
 
 # height mapping
 height_map = {'5\'4\"\"': '64', '5\'9\"\"': '69', '5\'10\"\"': '70', '5\'11\"\"': '71',
@@ -48,10 +46,17 @@ data = data.withColumn("#Height", data["#Height"].cast(IntegerType()))
 mean_age = int(data.select(round(mean("#Age"))).collect()[0][0])
 mean_weight = int(data.select(round(mean("#Weight"))).collect()[0][0])
 mean_height = int(data.select(round(mean("#Height"))).collect()[0][0])
-mean_time_from_last_shot = int(data.select(round(mean("time from last shot"))).collect()[0][0])
 
 data = data.fillna({'#Age': mean_age, '#Weight': mean_weight,
-                     '#Height': mean_height, 'time from last shot': mean_time_from_last_shot})
+                     '#Height': mean_height})
+
+# Normalize height using min normalization
+data = data.withColumn("#Height", (data["#Height"] - data.selectExpr("min(`#Height`) as min").collect()[0][0]) / (data.selectExpr("max(`#Height`) as max").collect()[0][0] - data.selectExpr("min(`#Height`) as min").collect()[0][0])) 
+
+# Normalize Age, Weight, GamesPlayed using Z-Score
+data = data.withColumn("#Age", (data["#Age"] - mean_age) / data.selectExpr("stddev_samp(`#Age`) as std").collect()[0][0])
+data = data.withColumn("#Weight", (data["#Weight"] - mean_weight) / data.selectExpr("stddev_samp(`#Weight`) as std").collect()[0][0])
+data = data.withColumn("#GamesPlayed", (data["#GamesPlayed"] - mean_weight) / data.selectExpr("stddev_samp(`#GamesPlayed`) as std").collect()[0][0])
 
 # Normalize location x and location y
 # for location x, we'll split the full length of the court into one half-court
@@ -60,33 +65,58 @@ data = data.withColumn("location x", when(data["location x"] > 470, (940 - data[
 # for location y, we only need to divide by the max court length
 data = data.withColumn("location y", data["location y"] / 500)
 
-# Process time to be the duration of the match in seconds then normalize it
-# to range from 0 to 1
-# 2880 represents the number of minutes in a 48 minute match (4 quarters of 12 minutes each)
-split_time = split(col('time'), ':')
-#minutes = split_time.getItem(0)
-#seconds = split_time.getItem(1)
 
-#seconds = split_time.getItem(0).cast(IntegerType()) * 60 + split_time.getItem(1).cast(IntegerType())
-#data = data.withColumn("time", seconds + ((data['quarter'] - 1) * 720) / 2880)
-#data = data.withColumn("time", (((split(col('time'), ':').getItem(0).cast(IntegerType())) * 60)
-#    + split(col('time'), ':').getItem(1).cast(IntegerType())) * ((data["quarter"] - 1) * 720) 
-#    / 2880)
-minutes = regexp_extract(col('time'), r'^(\d+):', 1).cast('int')
-seconds = regexp_extract(col('time'), r':(\d+)$', 1).cast('int')
-total_seconds = (minutes * 60) + seconds
-data = data.withColumn('time', total_seconds)
-data = data.drop("quarter")
+# Encoding the categorical columns
 
-# Show first 5 time rows
-data.select("time").show(5)
+# Current shot outcome encoding, SCORED: 1, otherwise: 0
+data = data.withColumn("current shot outcome", when(data["current shot outcome"] == "SCORED", 1).otherwise(0))
+# Rookie year encoding, Rookie: 1, otherwise: 0
+data = data.withColumn("#Rookie", when(data["#Rookie"] == "Y", 1).otherwise(0))
+# Map player position from ['SF' 'C' 'SG' 'PG' 'PF' 'G' 'F'] to [0, 1, 2, 3, 4 ,5, 6]
+position_map = {'SF': '0', 'C': '1', 'SG': '2', 'PG': '3', 'PF': '4', 'G': '5', 'F': '6'}
+data = data.replace(position_map, subset=['player position'])
+data = data.withColumn("player position", data["player position"].cast(IntegerType()))
 
 
-# print count of nulls in every column
-for col in data.columns:
-    print(col, "\t", "with null values: ", data.filter(data[col].isNull()).count())
+# We're only going to take into account the 10 most common shot types as there are
+# around 800+ different shot types some of which only occur once or twice
 
+# Get the 10 most common shot types
+#shot_type = data.groupBy("shot type").count().orderBy("count", ascending=False).limit(10).collect()
+# Map the shot types to integers
+#shot_type_map = {shot_type[i][0]: str(i) for i in range(len(shot_type))}
+# Replace the shot types with the integers
+#data = data.replace(shot_type_map, subset=['shot type'])
+#data = data.withColumn("shot type", data["shot type"].cast(IntegerType()))
+# drop nulls after taking the 10 most common shot types
+#data = data.dropna(subset=['shot type'])
 
+# train gbt regressor model
+# split data into training and testing sets
+
+# create the feature vector
+assembler = VectorAssembler(inputCols=["#Age", "#Height", "#Weight", 
+    "#GamesPlayed", "location x", "location y", "player position",
+    "time", "accuracy", '#Rookie' ], outputCol="features") 
+
+# transform the data
+data = assembler.transform(data)
+
+train, test = data.randomSplit([0.75, 0.25], seed=42)
+
+# create the gbt regressor model
+gbt = GBTRegressor(featuresCol="features", labelCol="current shot outcome", maxIter=10)
+
+# train the model
+model = gbt.fit(train)
+
+# make predictions on the test data
+predictions = model.transform(test)
+
+# evaluate the model
+evaluator = RegressionEvaluator(labelCol="current shot outcome", predictionCol="prediction", metricName="rmse")
+rmse = evaluator.evaluate(predictions)
+print("Root Mean Squared Error (RMSE) on test data = %g" % rmse)
 # stop the SparkContext object
 spark.stop()
 
