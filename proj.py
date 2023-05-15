@@ -1,6 +1,7 @@
 from pyspark.ml.feature import VectorAssembler
-from pyspark.ml.regression import GBTRegressor
-from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.ml.regression import GBTRegressor, RandomForestRegressor
+from pyspark.ml.classification import GBTClassifier, RandomForestClassifier
+from pyspark.ml.evaluation import RegressionEvaluator, MulticlassClassificationEvaluator
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import when, mean, round, concat_ws, col, split, expr, regexp_extract
 from pyspark.sql.types import IntegerType
@@ -8,7 +9,7 @@ from pyspark.sql.types import IntegerType
 # create a SparkContext object
 spark = SparkSession.builder.appName("NBA_Shot_Analysis").getOrCreate()
 data = spark.read.csv("./NBA shot log 16-17-regular season/Shot data/*.csv", header=True, inferSchema=True)
-player_data = spark.read.csv("C:/Users/Muhab/Documents/GitHub/Cmpn451_NBA_shots_analysis/NBA shot log 16-17-regular season\Player Regular 16-17 Stats.csv", header=True, inferSchema=True)
+player_data = spark.read.csv("./NBA shot log 16-17-regular season/Player Regular 16-17 Stats.csv", header=True, inferSchema=True)
 
 # Add a column to player_data that is the player's name combine the First Name and Last Name
 player_data = player_data.withColumn("Name", concat_ws(" ","#FirstName",'#LastName'))
@@ -108,15 +109,75 @@ train, test = data.randomSplit([0.75, 0.25], seed=42)
 gbt = GBTRegressor(featuresCol="features", labelCol="current shot outcome", maxIter=10)
 
 # train the model
-model = gbt.fit(train)
+gbt_model = gbt.fit(train)
 
 # make predictions on the test data
-predictions = model.transform(test)
+gbt_predictions = gbt_model.transform(test)
+
+# turn predictions into binary values
+gbt_predictions = gbt_predictions.withColumn("prediction", when(gbt_predictions["prediction"] > 0.5, 1.0).otherwise(0.0))
 
 # evaluate the model
 evaluator = RegressionEvaluator(labelCol="current shot outcome", predictionCol="prediction", metricName="rmse")
-rmse = evaluator.evaluate(predictions)
-print("Root Mean Squared Error (RMSE) on test data = %g" % rmse)
+rmse = evaluator.evaluate(gbt_predictions)
+print("GBT Root Mean Squared Error (RMSE) on test data = %g" % rmse)
+
+# evaluate using classification evaluator
+evaluator = MulticlassClassificationEvaluator(labelCol="current shot outcome", predictionCol="prediction", metricName="accuracy")
+accuracy = evaluator.evaluate(gbt_predictions)
+print("GBT Accuracy on test data = %g" % accuracy)
+
+# create gbt classifier model
+gbt = GBTClassifier(featuresCol="features", labelCol="current shot outcome", maxIter=10)
+
+# train the model
+gbt_model = gbt.fit(train)
+
+# make predictions on the test data
+gbt_predictions = gbt_model.transform(test)
+
+# evaluate the model
+evaluator = MulticlassClassificationEvaluator(labelCol="current shot outcome", predictionCol="prediction", metricName="accuracy")
+accuracy = evaluator.evaluate(gbt_predictions)
+print("GBT Classifier Accuracy on test data = %g" % accuracy)
+
+# create the random forest regressor model
+rf = RandomForestRegressor(featuresCol="features", labelCol="current shot outcome", numTrees=150)
+
+# train the model
+rf_model = rf.fit(train)
+
+# make predictions on the test data
+rf_predictions = rf_model.transform(test)
+
+# turn predictions into binary values
+rf_predictions = rf_predictions.withColumn("prediction", when(rf_predictions["prediction"] > 0.5, 1.0).otherwise(0.0))
+
+# evaluate the model
+evaluator = RegressionEvaluator(labelCol="current shot outcome", predictionCol="prediction", metricName="rmse")
+rmse = evaluator.evaluate(rf_predictions)
+print("Random Forest Root Mean Squared Error (RMSE) on test data = %g" % rmse)
+
+# evaluate using classification evaluator
+evaluator = MulticlassClassificationEvaluator(labelCol="current shot outcome", predictionCol="prediction", metricName="accuracy")
+accuracy = evaluator.evaluate(rf_predictions)
+print("Random Forest Accuracy on test data = %g" % accuracy)
+
+# create random forest classifier model
+rf = RandomForestClassifier(featuresCol="features", labelCol="current shot outcome", numTrees=150)
+
+# train the model
+rf_model = rf.fit(train)
+
+# make predictions on the test data
+rf_predictions = rf_model.transform(test)
+
+# evaluate the model
+evaluator = MulticlassClassificationEvaluator(labelCol="current shot outcome", predictionCol="prediction", metricName="accuracy")
+accuracy = evaluator.evaluate(rf_predictions)
+print("Random Forest Classifier Accuracy on test data = %g" % accuracy)
+
+
 # stop the SparkContext object
 spark.stop()
 
